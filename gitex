@@ -1,0 +1,383 @@
+#! /usr/bin/env -S ipso --
+
+find : (a -> Bool) -> Array a -> (| Found : Int, Missing : () |)
+find predicate items = 
+  (array.foldl 
+    (\{ index, result } item ->
+      let nextIndex = index + 1 in
+      case result of
+        Found _ -> 
+          { index = nextIndex, result = result }
+        Missing () ->
+          if predicate item
+          then { index = nextIndex, result = Found index }
+          else { index = nextIndex, result = result }
+    )
+    { index = 0, result = Missing () }
+    items
+  ).result
+
+parseArgs : Array String -> (| Help : (), Show : String, Type : String, Error : String |)
+parseArgs args =
+  case find (\item -> item == "--help" || item == "-h") args of
+    Found _ -> Help ()
+    Missing () ->
+      let argsLength = array.length args in
+      if argsLength >= 1
+      then
+        case array.index 0 args of
+          "show" ->
+            if argsLength == 2
+            then Show (array.index 1 args)
+            else Error "the \"show\" command takes exactly 1 argument"
+          "type" ->
+            if argsLength == 2
+            then Type (array.index 1 args)
+            else Error "the \"type\" command takes exactly 1 argument"
+          command -> Error "invalid command \"$command\""
+      else
+        Error "invalid usage"
+
+parseUri : 
+  String -> 
+  # https://github.com/LightAndLight/ipso/issues/365
+  (| 
+    Object : { hash : String },
+    Blob : { hash : String },
+    Commit :
+      { 
+        hash : String,
+        path :
+          (|
+            None : (),
+            Tree : Array String,
+            Parent : Array String
+          |)
+      },
+    Tree : { hash : String },
+    Error : String
+  |)
+parseUri input =
+  let splitted = string.split ":" input in
+  let splittedLength = array.length splitted in
+  if splittedLength < 3
+  then Error "invalid Git URI: $input"
+  else
+    case array.index 0 splitted of
+      "git" -> 
+        let makePath = \xs -> string.join ":" <| array.slice 2 (splittedLength - 2) xs in
+        case array.index 1 splitted of
+          "object" -> 
+            Object { hash = makePath splitted }
+          "blob" ->
+            Blob { hash = makePath splitted }
+          "commit" ->
+            let splittedPath = string.split "/" <| makePath splitted in
+            case array.length splittedPath of
+              0 ->
+                Error "invalid Git URI: $input"
+              1 ->
+                Commit { hash = array.index 0 splittedPath, path = None () }
+              _ ->
+                # https://github.com/LightAndLight/ipso/issues/82
+                let hash = array.index 0 splittedPath in
+                let item = array.index 1 splittedPath in
+                let rest = array.slice 2 (array.length splittedPath - 2) splittedPath in
+                case item of
+                  "tree" ->
+                    Commit { hash = hash, path = Tree rest }
+                  "parent" ->
+                    Commit { hash = hash, path = Parent rest }
+                  _ ->
+                    Error "invalid Git URI: $input"
+          "tree" ->
+            Tree { hash = makePath splitted }
+          _ ->
+            Error "invalid Git URI: $input"
+      _ ->
+        Error "invalid Git URI: $input"
+
+readObjectType : String -> IO String
+readObjectType hash = io.map string.trim <| cmd.read `git cat-file -t $hash` 
+
+checkObjectType : String -> String -> IO (| Correct : (), Incorrect : String |)
+checkObjectType hash expectedType =
+  comp
+    bind actualType <- readObjectType hash
+    if expectedType == actualType
+      then io.pure (Correct ())
+      else io.pure (Incorrect "git:object:$hash is a $actualType, not a $expectedType")
+
+andThen : (| Err : a, r1 |) -> ((| r1 |) -> (| Err : a, r2 |)) -> (| Err : a, r2 |)
+andThen e1 f =
+  case e1 of
+    Err err ->
+      Err err
+    rest ->
+      f rest
+
+parseCommitContent :
+  String -> 
+  (| Ok : { tree : String, parent : String }, Err : String |)
+parseCommitContent input =
+  let lines = string.partsc '\n' input in
+  if array.length lines < 2
+  then Err "expected at least 2 lines commit content"
+  else
+    andThen
+      (case string.partsc ' ' <| array.index 0 lines of
+        [fieldName, hash] ->
+          case fieldName of
+            "tree" ->
+              Ok hash
+            _ ->
+              Err "commit content: line 1: expected format: tree {hash}"
+        _ ->
+          Err "commit content: line 1: expected format: tree {hash}"
+      )
+      (\(Ok tree) ->
+        andThen
+          (case string.partsc ' ' <| array.index 1 lines of
+            [fieldName, hash] ->
+              case fieldName of
+                "parent" ->
+                  Ok hash
+                _ ->
+                  Err "commit content: line 2: expected format: parent {hash}"
+            _ ->
+              Err "commit content: line 2: expected format: parent {hash}"
+          )
+          (\(Ok parent) -> 
+            Ok { tree = tree, parent = parent }
+          )
+      )
+
+parseTreeContent :
+  String ->
+  # https://github.com/LightAndLight/ipso/issues/365
+  Array
+    (|
+      Ok :
+        { 
+          mode : String,
+          objectType : String,
+          hash : String,
+          name : String
+        },
+      Err : String
+    |)
+parseTreeContent input =
+  let lines = string.partsc '\n' input in
+  array.map
+    (\line ->
+      case string.partsc '\t' line of
+        [info, name] ->
+          case string.partsc ' ' info of
+            [mode, objectType, hash] ->
+              Ok { mode = mode, objectType = objectType, hash = hash, name = name }
+            _ ->
+              Err "invalid tree format: expected format: {mode} {objectType} {hash}\t{name}"
+        _ ->
+          Err "invalid tree format: missing tab character"
+    )
+    lines
+
+lookupTreeFile :
+  String ->
+  Array
+    (|
+      Ok :
+        { 
+          mode : String,
+          objectType : String,
+          hash : String,
+          name : String
+        },
+      Err : String
+    |) ->
+  (|
+    Ok :
+      { 
+        mode : String,
+        objectType : String,
+        hash : String,
+        name : String
+      },
+    Err : String,
+    Missing : ()
+  |)
+lookupTreeFile name =
+  array.foldl
+    (\result entry ->
+      case result of
+        Missing () ->
+          case entry of
+            Ok entry ->
+              if entry.name == name
+                then Ok entry
+                else result
+            Err err ->
+              Err err
+        _ ->
+          result
+    )
+    (Missing ())
+
+main : IO ()
+main =
+  comp
+    bind args <- env.args
+    case parseArgs args of
+      Help () ->
+        comp
+          bind program <- env.program
+          println "USAGE: $program COMMAND URI"
+          println ""
+          println "Commands:"
+          println "  type  Print the type of a Git object"
+          println "  show  Print the contents of a Git object"
+          println ""
+          println "Options:"
+          println "  -h, --help  Print help information"
+      Show value -> 
+        case parseUri value of
+          Object { hash } -> 
+            cmd.run `git cat-file -p $hash`
+          Blob { hash } ->
+            comp
+              bind result <- checkObjectType hash "blob"
+              case result of
+                Correct () ->
+                  cmd.run `git cat-file -p $hash`
+                Incorrect err ->
+                  comp
+                    println "error: $err"
+                    exit.failure
+          Commit { hash, path } -> 
+            comp
+              bind result <- checkObjectType hash "commit"
+              case result of
+                Correct () ->
+                  comp
+                    bind commitContent <- cmd.read `git cat-file -p $hash`
+                    case parseCommitContent commitContent of
+                      Err err ->
+                        comp
+                          println "error: $err"
+                          exit.failure
+                      Ok { tree, parent } ->
+                        case path of
+                          None () -> cmd.run `git cat-file -p $hash`
+                          Tree segments ->
+                            comp
+                              bind result <-
+                                array.foldl
+                                  (\getState segment ->
+                                    comp
+                                      bind state <- getState
+                                      bind currentObjectType <- readObjectType state.hash
+                                      if currentObjectType != "tree"
+                                        then
+                                          comp
+                                            println "error: ${state.name} is a $currentObjectType, not a tree"
+                                            exit.failure
+                                        else
+                                          comp
+                                            bind treeContent <- cmd.read `git cat-file -p ${state.hash}`
+                                            let entries = parseTreeContent treeContent
+                                            case lookupTreeFile segment entries of
+                                              Ok entry ->
+                                                io.pure { name = segment, hash = entry.hash }
+                                              Err err ->
+                                                comp
+                                                  println "error: $err"
+                                                  exit.failure
+                                              Missing () ->
+                                                comp
+                                                  println "error: $segment not found"
+                                                  exit.failure
+                                  )
+                                  (io.pure { name = "tree", hash = tree })
+                                  segments
+                              cmd.run `git cat-file -p ${result.hash}`
+                          Parent rest -> cmd.run `git cat-file -p $parent`
+                Incorrect err ->
+                  comp
+                    println "error: $err"
+                    exit.failure
+          Tree { hash } -> 
+            comp
+              bind result <- checkObjectType hash "tree"
+              case result of
+                Correct () ->
+                  cmd.run `git cat-file -p $hash`
+                Incorrect err ->
+                  comp
+                    println "error: $err"
+                    exit.failure
+          Error err ->
+            comp
+              println "error: $err"
+              exit.failure
+      Type value ->
+        case parseUri value of
+          Object { hash } -> 
+            comp
+              bind objectType <- readObjectType hash
+              println objectType
+          Blob { hash } ->
+            comp
+              bind result <- checkObjectType hash "blob"
+              case result of
+                Correct () ->
+                  println "blob"
+                Incorrect err ->
+                  comp
+                    println "error: $err"
+                    exit.failure
+          Commit { hash, path } -> 
+            comp
+              bind result <- checkObjectType hash "commit"
+              case result of
+                Correct () ->
+                  comp
+                    bind commitContent <- cmd.read `git cat-file -p $hash`
+                    case parseCommitContent commitContent of
+                      Err err ->
+                        comp
+                          println "error: $err"
+                          exit.failure
+                      Ok { tree, parent } ->
+                        case path of
+                          None () ->
+                            println "commit"
+                          Tree rest -> 
+                            comp
+                              bind objectType <- readObjectType tree
+                              println objectType
+                          Parent rest ->
+                            comp
+                              bind objectType <- readObjectType parent
+                              println objectType
+                Incorrect err ->
+                  comp
+                    println "error: $err"
+                    exit.failure
+          Tree { hash } -> 
+            comp
+              bind result <- checkObjectType hash "tree"
+              case result of
+                Correct () ->
+                  println "tree"
+                Incorrect err ->
+                  comp
+                    println "error: $err"
+                    exit.failure
+          Error err ->
+            comp
+              println "error: $err"
+              exit.failure
+      Error err ->
+        comp
+          println "error: $err"
+          exit.failure
