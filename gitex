@@ -1,5 +1,6 @@
 #! /usr/bin/env -S ipso --
 
+# https://github.com/LightAndLight/ipso/issues/324
 find : (a -> Bool) -> Array a -> (| Found : Int, Missing : () |)
 find predicate items = 
   (array.foldl 
@@ -22,6 +23,25 @@ parseArgs args =
   case find (\item -> item == "--help" || item == "-h") args of
     Found _ -> Help ()
     Missing () ->
+      # case args of
+      #   https://github.com/LightAndLight/ipso/issues/82
+      #   https://github.com/LightAndLight/ipso/issues/354
+      #   ["show", ..rest] ->
+      #     case rest of
+      #       [argument] ->
+      #         Show argument
+      #       _ ->
+      #         Error "the \"show\" command takes exactly 1 argument"
+      #   ["type", ..rest] ->
+      #     case rest of
+      #       [argument] ->
+      #         Show argument
+      #       _ ->
+      #         Error "the \"type\" command takes exactly 1 argument"
+      #   [command, ..rest] ->
+      #     Error "invalid command: $command"
+      #   _ ->
+      #     Error "invalid usage"
       let argsLength = array.length args in
       if argsLength >= 1
       then
@@ -40,11 +60,11 @@ parseArgs args =
 
 parseUri : 
   String -> 
-  # https://github.com/LightAndLight/ipso/issues/365
   (| 
     Object : { hash : String },
     Blob : { hash : String },
     Commit :
+      # https://github.com/LightAndLight/ipso/issues/365
       { 
         hash : String,
         path :
@@ -59,6 +79,31 @@ parseUri :
   |)
 parseUri input =
   let splitted = string.split ":" input in
+  # case splitted of
+  #   ["git", objectType, ..rest] ->
+  #     case objectType of
+  #       "object" ->
+  #         Object { hash = string.join ":" rest }
+  #       "blob" ->
+  #         Blob { hash = string.join ":" rest }
+  #       "commit" ->
+  #         case string.split "/" <| string.join ":" rest of
+  #           [hash, ..rest] ->
+  #             case rest of
+  #               ["tree", ..rest] ->
+  #                 https://github.com/LightAndLight/ipso/issues/320
+  #                 Commit { hash, path = Tree rest }
+  #               ["parent", ..rest] ->
+  #                 Commit { hash, path = Parent rest }
+  #               _ ->
+  #                 Error "invalid Git URI: $input"
+  #           _ ->
+  #             Error "invalid Git URI: $input"
+  #       "tree" ->
+  #       _ ->
+  #         Error "invalid Git URI: $input"
+  #   _ ->
+  #     Error "invalid Git URI: $input"
   let splittedLength = array.length splitted in
   if splittedLength < 3
   then Error "invalid Git URI: $input"
@@ -108,21 +153,21 @@ checkObjectType hash expectedType =
       then io.pure (Correct ())
       else io.pure (Incorrect "git:object:$hash is a $actualType, not a $expectedType")
 
-andThen : (| Err : a, r1 |) -> ((| r1 |) -> (| Err : a, r2 |)) -> (| Err : a, r2 |)
+andThen : (| Error : a, r1 |) -> ((| r1 |) -> (| Error : a, r2 |)) -> (| Error : a, r2 |)
 andThen e1 f =
   case e1 of
-    Err err ->
-      Err err
+    Error err ->
+      Error err
     rest ->
       f rest
 
 parseCommitContent :
   String -> 
-  (| Ok : { tree : String, parent : String }, Err : String |)
+  (| Ok : { tree : String, parent : String }, Error : String |)
 parseCommitContent input =
   let lines = string.partsc '\n' input in
   if array.length lines < 2
-  then Err "expected at least 2 lines commit content"
+  then Error "expected at least 2 lines commit content"
   else
     andThen
       (case string.partsc ' ' <| array.index 0 lines of
@@ -131,9 +176,9 @@ parseCommitContent input =
             "tree" ->
               Ok hash
             _ ->
-              Err "commit content: line 1: expected format: tree {hash}"
+              Error "commit content: line 1: expected format: tree {hash}"
         _ ->
-          Err "commit content: line 1: expected format: tree {hash}"
+          Error "commit content: line 1: expected format: tree {hash}"
       )
       (\(Ok tree) ->
         andThen
@@ -143,9 +188,9 @@ parseCommitContent input =
                 "parent" ->
                   Ok hash
                 _ ->
-                  Err "commit content: line 2: expected format: parent {hash}"
+                  Error "commit content: line 2: expected format: parent {hash}"
             _ ->
-              Err "commit content: line 2: expected format: parent {hash}"
+              Error "commit content: line 2: expected format: parent {hash}"
           )
           (\(Ok parent) -> 
             Ok { tree = tree, parent = parent }
@@ -154,17 +199,17 @@ parseCommitContent input =
 
 parseTreeContent :
   String ->
-  # https://github.com/LightAndLight/ipso/issues/365
   Array
     (|
       Ok :
+        # https://github.com/LightAndLight/ipso/issues/365
         { 
           mode : String,
           objectType : String,
           hash : String,
           name : String
         },
-      Err : String
+      Error : String
     |)
 parseTreeContent input =
   let lines = string.partsc '\n' input in
@@ -176,15 +221,16 @@ parseTreeContent input =
             [mode, objectType, hash] ->
               Ok { mode = mode, objectType = objectType, hash = hash, name = name }
             _ ->
-              Err "invalid tree format: expected format: {mode} {objectType} {hash}\t{name}"
+              Error "invalid tree format: expected format: {mode} {objectType} {hash}\t{name}"
         _ ->
-          Err "invalid tree format: missing tab character"
+          Error "invalid tree format: missing tab character"
     )
     lines
 
 lookupTreeFile :
   String ->
   Array
+    # https://github.com/LightAndLight/ipso/issues/365
     (|
       Ok :
         { 
@@ -193,17 +239,17 @@ lookupTreeFile :
           hash : String,
           name : String
         },
-      Err : String
+      Error : String
     |) ->
   (|
-    Ok :
+    Found :
       { 
         mode : String,
         objectType : String,
         hash : String,
         name : String
       },
-    Err : String,
+    Error : String,
     Missing : ()
   |)
 lookupTreeFile name =
@@ -214,14 +260,20 @@ lookupTreeFile name =
           case entry of
             Ok entry ->
               if entry.name == name
-                then Ok entry
+                then Found entry
                 else result
-            Err err ->
-              Err err
+            Error err ->
+              Error err
         _ ->
           result
     )
     (Missing ())
+
+exitWithError : String -> IO a
+exitWithError err =
+  comp
+    println "error: $err"
+    exit.failure
 
 main : IO ()
 main =
@@ -250,9 +302,7 @@ main =
                 Correct () ->
                   cmd.run `git cat-file -p $hash`
                 Incorrect err ->
-                  comp
-                    println "error: $err"
-                    exit.failure
+                  exitWithError err
           Commit { hash, path } -> 
             comp
               bind result <- checkObjectType hash "commit"
@@ -261,10 +311,8 @@ main =
                   comp
                     bind commitContent <- cmd.read `git cat-file -p $hash`
                     case parseCommitContent commitContent of
-                      Err err ->
-                        comp
-                          println "error: $err"
-                          exit.failure
+                      Error err ->
+                        exitWithError err
                       Ok { tree, parent } ->
                         case path of
                           None () -> cmd.run `git cat-file -p $hash`
@@ -278,33 +326,25 @@ main =
                                       bind currentObjectType <- readObjectType state.hash
                                       if currentObjectType != "tree"
                                         then
-                                          comp
-                                            println "error: ${state.name} is a $currentObjectType, not a tree"
-                                            exit.failure
+                                          exitWithError "${state.name} is a $currentObjectType, not a tree"
                                         else
                                           comp
                                             bind treeContent <- cmd.read `git cat-file -p ${state.hash}`
                                             let entries = parseTreeContent treeContent
                                             case lookupTreeFile segment entries of
-                                              Ok entry ->
+                                              Found entry ->
                                                 io.pure { name = segment, hash = entry.hash }
-                                              Err err ->
-                                                comp
-                                                  println "error: $err"
-                                                  exit.failure
+                                              Error err ->
+                                                exitWithError err
                                               Missing () ->
-                                                comp
-                                                  println "error: $segment not found"
-                                                  exit.failure
+                                                exitWithError "$segment not found"
                                   )
                                   (io.pure { name = "tree", hash = tree })
                                   segments
                               cmd.run `git cat-file -p ${result.hash}`
                           Parent rest -> cmd.run `git cat-file -p $parent`
                 Incorrect err ->
-                  comp
-                    println "error: $err"
-                    exit.failure
+                  exitWithError err
           Tree { hash } -> 
             comp
               bind result <- checkObjectType hash "tree"
@@ -312,13 +352,9 @@ main =
                 Correct () ->
                   cmd.run `git cat-file -p $hash`
                 Incorrect err ->
-                  comp
-                    println "error: $err"
-                    exit.failure
+                  exitWithError err
           Error err ->
-            comp
-              println "error: $err"
-              exit.failure
+            exitWithError err
       Type value ->
         case parseUri value of
           Object { hash } -> 
@@ -332,9 +368,7 @@ main =
                 Correct () ->
                   println "blob"
                 Incorrect err ->
-                  comp
-                    println "error: $err"
-                    exit.failure
+                  exitWithError err
           Commit { hash, path } -> 
             comp
               bind result <- checkObjectType hash "commit"
@@ -343,10 +377,8 @@ main =
                   comp
                     bind commitContent <- cmd.read `git cat-file -p $hash`
                     case parseCommitContent commitContent of
-                      Err err ->
-                        comp
-                          println "error: $err"
-                          exit.failure
+                      Error err ->
+                        exitWithError err
                       Ok { tree, parent } ->
                         case path of
                           None () ->
@@ -360,9 +392,7 @@ main =
                               bind objectType <- readObjectType parent
                               println objectType
                 Incorrect err ->
-                  comp
-                    println "error: $err"
-                    exit.failure
+                  exitWithError err
           Tree { hash } -> 
             comp
               bind result <- checkObjectType hash "tree"
@@ -370,14 +400,8 @@ main =
                 Correct () ->
                   println "tree"
                 Incorrect err ->
-                  comp
-                    println "error: $err"
-                    exit.failure
+                  exitWithError err
           Error err ->
-            comp
-              println "error: $err"
-              exit.failure
+            exitWithError err
       Error err ->
-        comp
-          println "error: $err"
-          exit.failure
+        exitWithError err
