@@ -63,23 +63,22 @@ parseUri :
   (| 
     Object : { hash : String },
     Blob : { hash : String },
-    Commit :
-      # https://github.com/LightAndLight/ipso/issues/365
-      { 
-        hash : String,
-        path :
-          (|
-            None : (),
-            Tree : Array String,
-            Parent : Array String
-          |)
-      },
+    Commit : { 
+      hash : String,
+      path : (|
+        None : (),
+        Tree : Array String,
+        Parent : Array String
+      |)
+    },
     Tree : { hash : String },
     Error : String
   |)
 parseUri input =
   let splitted = string.split ":" input in
   # case splitted of
+  #   https://github.com/LightAndLight/ipso/issues/82
+  #   https://github.com/LightAndLight/ipso/issues/354
   #   ["git", objectType, ..rest] ->
   #     case objectType of
   #       "object" ->
@@ -199,18 +198,15 @@ parseCommitContent input =
 
 parseTreeContent :
   String ->
-  Array
-    (|
-      Ok :
-        # https://github.com/LightAndLight/ipso/issues/365
-        { 
-          mode : String,
-          objectType : String,
-          hash : String,
-          name : String
-        },
-      Error : String
-    |)
+  Array (|
+    Ok : { 
+      mode : String,
+      objectType : String,
+      hash : String,
+      name : String
+    },
+    Error : String
+  |)
 parseTreeContent input =
   let lines = string.partsc '\n' input in
   array.map
@@ -229,26 +225,22 @@ parseTreeContent input =
 
 lookupTreeFile :
   String ->
-  Array
-    # https://github.com/LightAndLight/ipso/issues/365
-    (|
-      Ok :
-        { 
-          mode : String,
-          objectType : String,
-          hash : String,
-          name : String
-        },
-      Error : String
-    |) ->
+  Array (|
+    Ok : { 
+      mode : String,
+      objectType : String,
+      hash : String,
+      name : String
+    },
+    Error : String
+  |) ->
   (|
-    Found :
-      { 
-        mode : String,
-        objectType : String,
-        hash : String,
-        name : String
-      },
+    Found : { 
+      mode : String,
+      objectType : String,
+      hash : String,
+      name : String
+    },
     Error : String,
     Missing : ()
   |)
@@ -275,22 +267,26 @@ exitWithError err =
     println "error: $err"
     exit.failure
 
+printHelp : IO ()
+printHelp =
+  comp
+    bind program <- env.program
+    println "USAGE: $program COMMAND URI"
+    println ""
+    println "Commands:"
+    println "  type  Print the type of a Git object"
+    println "  show  Print the contents of a Git object"
+    println ""
+    println "Options:"
+    println "  -h, --help  Print help information"
+
 main : IO ()
 main =
   comp
     bind args <- env.args
     case parseArgs args of
       Help () ->
-        comp
-          bind program <- env.program
-          println "USAGE: $program COMMAND URI"
-          println ""
-          println "Commands:"
-          println "  type  Print the type of a Git object"
-          println "  show  Print the contents of a Git object"
-          println ""
-          println "Options:"
-          println "  -h, --help  Print help information"
+        printHelp
       Show value -> 
         case parseUri value of
           Object { hash } -> 
@@ -404,4 +400,8 @@ main =
           Error err ->
             exitWithError err
       Error err ->
-        exitWithError err
+        comp
+          println "error: $err"
+          println ""
+          printHelp
+          exit.failure
