@@ -434,31 +434,38 @@ main =
                   exitWithError err
           Error err ->
             exitWithError err
-      Uri uri ->
+      Uri path ->
         comp
-          bind blobHash <- io.map string.trim <| cmd.read `git hash-object $uri`
-          println "git:blob:$blobHash"
+          bind objectHash <- io.map string.trim <| cmd.read `git rev-parse HEAD:$path`
+          bind objectType <- readObjectType objectHash
+          case objectType of
+            "blob" ->
+              println "git:blob:$objectHash"
+            "tree" ->
+              println "git:tree:$objectHash"
+            _ ->
+              println "internal error: unexpected object type $objectType"
           # cmd.eachline_ `git log --pretty=tformat:"%H %T"` (\line ->
           let format = "%H %T"
-          cmd.eachline_ `git show --pretty=tformat:$format --no-patch` (\line ->
+          cmd.eachline_ `git log --diff-filter=AM -n 1 --format=tformat:$format -- $path` (\line ->
             comp
               case string.parts " " line of
                 [commitHash, treeHash] ->
                   comp
-                    bind treeLines <- cmd.lines `git ls-tree $commitHash --format "%(objectname) %(path)"`
+                    bind treeLines <- cmd.lines `git ls-tree $commitHash --full-tree -r -t --format "%(objectname) %(path)"`
                     let
                       objectPath? =
                         findMap
                         (\treeLine -> case string.parts " " treeLine of
                           [entryHash, entryPath] ->
-                            if entryHash == blobHash
+                            if entryHash == objectHash
                               then Found entryPath
                                 else Missing ()
                         )
                         treeLines
                     case objectPath? of
                       Found { index, value } ->
-                        println "git:commit:$commitHash/$value"
+                        println "git:commit:$commitHash/tree/$value"
                       Missing () ->
                         io.pure ()
                 _ ->
