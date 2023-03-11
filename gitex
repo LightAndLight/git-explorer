@@ -480,6 +480,22 @@ main =
             exitWithError err
       Uri path ->
         comp
+          bind statusLines <- cmd.lines `git status --porcelain`
+          let 
+            uncommitted? =
+              find
+                (\statusLine ->
+                  case string.parts " " statusLine of
+                    [statusType, statusPath] -> statusPath == path
+                    _ -> false
+                )
+                statusLines
+          case uncommitted? of
+            Found _ ->
+              println "warning: $path has uncommitted changes. Showing URIs for the most recently committed version.\n"
+            Missing () ->
+              io.pure ()
+          
           bind objectHash <- io.map string.trim <| cmd.read `git rev-parse HEAD:$path`
           bind objectType <- readObjectType objectHash
           case objectType of
@@ -521,5 +537,5 @@ main =
         comp
           println "error: $message"
           println ""
-          help
+          help # change
           exit.failure
