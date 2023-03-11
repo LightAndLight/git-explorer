@@ -41,57 +41,114 @@ findMap predicate items =
     items
   ).result
 
+hasHelp : Array String -> Bool
+hasHelp args =
+  case find (\item -> item == "--help" || item == "-h") args of
+    Found _ -> true
+    Missing () -> false
+
+printHelp : IO ()
+printHelp =
+  comp
+    bind program <- env.program
+    println "USAGE: $program COMMAND ARGS"
+    println ""
+    println "Commands:"
+    println "  type  Get the type of a Git object"
+    println "  show  Print the contents of a Git object"
+    println "  uri   Calculate Git URIs for a file or directory"
+    println ""
+    println "Options:"
+    println "  -h, --help  Print help information"
+
+printTypeHelp : IO ()
+printTypeHelp =
+  comp
+    bind program <- env.program
+    println "USAGE: $program type URI"
+    println ""
+    println "Get the type of a Git object"
+    println ""
+    println "Options:"
+    println "  -h, --help  Print help information"
+
+printShowHelp : IO ()
+printShowHelp =
+  comp
+    bind program <- env.program
+    println "USAGE: $program show URI"
+    println ""
+    println "Print the contents of a Git object"
+    println ""
+    println "Options:"
+    println "  -h, --help  Print help information"
+
+printUriHelp : IO ()
+printUriHelp =
+  comp
+    bind program <- env.program
+    println "USAGE: $program uri PATH"
+    println ""
+    println "Calculate Git URIs for a file or directory"
+    println ""
+    println "Options:"
+    println "  -h, --help  Print help information"
+
+
 parseArgs :
   Array String ->
   (|
-    Help : (),
+    Help : IO (),
     Show : String,
     Type : String,
     Uri : String,
-    Error : String
+    Error : { message : String, help : IO () }
   |)
 parseArgs args =
-  case find (\item -> item == "--help" || item == "-h") args of
-    Found _ -> Help ()
-    Missing () ->
-      # case args of
-      #   https://github.com/LightAndLight/ipso/issues/82
-      #   https://github.com/LightAndLight/ipso/issues/354
-      #   ["show", ..rest] ->
-      #     case rest of
-      #       [argument] ->
-      #         Show argument
-      #       _ ->
-      #         Error "the \"show\" command takes exactly 1 argument"
-      #   ["type", ..rest] ->
-      #     case rest of
-      #       [argument] ->
-      #         Show argument
-      #       _ ->
-      #         Error "the \"type\" command takes exactly 1 argument"
-      #   [command, ..rest] ->
-      #     Error "invalid command: $command"
-      #   _ ->
-      #     Error "invalid usage"
-      let argsLength = array.length args in
-      if argsLength >= 1
-      then
-        case array.index 0 args of
-          "show" ->
-            if argsLength == 2
-            then Show (array.index 1 args)
-            else Error "the \"show\" command takes exactly 1 argument"
-          "type" ->
-            if argsLength == 2
-            then Type (array.index 1 args)
-            else Error "the \"type\" command takes exactly 1 argument"
-          "uri" ->
-            if argsLength == 2
-            then Uri (array.index 1 args)
-            else Error "the \"uri\" command takes exactly 1 argument"
-          command -> Error "invalid command \"$command\""
-      else
-        Error "invalid usage"
+  # case args of
+  #   https://github.com/LightAndLight/ipso/issues/82
+  #   https://github.com/LightAndLight/ipso/issues/354
+  #   ["show", ..rest] ->
+  #     case rest of
+  #       [argument] ->
+  #         Show argument
+  #       _ ->
+  #         Error "the \"show\" command takes exactly 1 argument"
+  #   ["type", ..rest] ->
+  #     case rest of
+  #       [argument] ->
+  #         Show argument
+  #       _ ->
+  #         Error "the \"type\" command takes exactly 1 argument"
+  #   [command, ..rest] ->
+  #     Error "invalid command: $command"
+  #   _ ->
+  #     Error "invalid usage"
+  let argsLength = array.length args in
+  if argsLength >= 1
+  then
+    case array.index 0 args of
+      "show" ->
+        if hasHelp args then Help printShowHelp else
+        if argsLength == 2
+          then Show (array.index 1 args)
+          else Error { message = "the \"show\" command takes exactly 1 argument", help = printShowHelp }
+      "type" ->
+        if hasHelp args then Help printTypeHelp else
+        if argsLength == 2
+          then Type (array.index 1 args)
+          else Error { message = "the \"type\" command takes exactly 1 argument", help = printTypeHelp }
+      "uri" ->
+        if hasHelp args then Help printUriHelp else
+        if argsLength == 2
+          then Uri (array.index 1 args)
+          else Error { message = "the \"uri\" command takes exactly 1 argument", help = printUriHelp }
+      command ->
+        if hasHelp args
+          then Help printHelp
+          else Error { message = "invalid command \"$command\"", help = printHelp }
+  else
+    Error { message = "invalid usage", help = printHelp }
 
 parseUri : 
   String -> 
@@ -302,26 +359,13 @@ exitWithError err =
     println "error: $err"
     exit.failure
 
-printHelp : IO ()
-printHelp =
-  comp
-    bind program <- env.program
-    println "USAGE: $program COMMAND URI"
-    println ""
-    println "Commands:"
-    println "  type  Print the type of a Git object"
-    println "  show  Print the contents of a Git object"
-    println ""
-    println "Options:"
-    println "  -h, --help  Print help information"
-
 main : IO ()
 main =
   comp
     bind args <- env.args
     case parseArgs args of
-      Help () ->
-        printHelp
+      Help printFunction ->
+        printFunction
       Show value -> 
         case parseUri value of
           Object { hash } -> 
@@ -473,9 +517,9 @@ main =
                     println "internal error: unexpected `git log` format"
                     exit.failure
             )
-      Error err ->
+      Error { message, help } ->
         comp
-          println "error: $err"
+          println "error: $message"
           println ""
-          printHelp
+          help
           exit.failure
