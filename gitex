@@ -18,7 +18,38 @@ find predicate items =
     items
   ).result
 
-parseArgs : Array String -> (| Help : (), Show : String, Type : String, Error : String |)
+# https://github.com/LightAndLight/ipso/issues/324
+findMap :
+  (a -> (| Found : b, Missing : () |)) ->
+  Array a ->
+  (| Found : { index : Int, value : b }, Missing : () |)
+findMap predicate items = 
+  (array.foldl 
+    (\{ index, result } item ->
+      let nextIndex = index + 1 in
+      case result of
+        Found _ -> 
+          { index = nextIndex, result = result }
+        Missing () ->
+          case predicate item of
+            Found value -> 
+              { index = nextIndex, result = Found { index = index, value = value } }
+            Missing () ->
+              { index = nextIndex, result = result }
+    )
+    { index = 0, result = Missing () }
+    items
+  ).result
+
+parseArgs :
+  Array String ->
+  (|
+    Help : (),
+    Show : String,
+    Type : String,
+    Uri : String,
+    Error : String
+  |)
 parseArgs args =
   case find (\item -> item == "--help" || item == "-h") args of
     Found _ -> Help ()
@@ -54,6 +85,10 @@ parseArgs args =
             if argsLength == 2
             then Type (array.index 1 args)
             else Error "the \"type\" command takes exactly 1 argument"
+          "uri" ->
+            if argsLength == 2
+            then Uri (array.index 1 args)
+            else Error "the \"uri\" command takes exactly 1 argument"
           command -> Error "invalid command \"$command\""
       else
         Error "invalid usage"
@@ -399,6 +434,38 @@ main =
                   exitWithError err
           Error err ->
             exitWithError err
+      Uri uri ->
+        comp
+          bind blobHash <- io.map string.trim <| cmd.read `git hash-object $uri`
+          println "git:blob:$blobHash"
+          # cmd.eachline_ `git log --pretty=tformat:"%H %T"` (\line ->
+          let format = "%H %T"
+          cmd.eachline_ `git show --pretty=tformat:$format --no-patch` (\line ->
+            comp
+              case string.parts " " line of
+                [commitHash, treeHash] ->
+                  comp
+                    bind treeLines <- cmd.lines `git ls-tree $commitHash --format "%(objectname) %(path)"`
+                    let
+                      objectPath? =
+                        findMap
+                        (\treeLine -> case string.parts " " treeLine of
+                          [entryHash, entryPath] ->
+                            if entryHash == blobHash
+                              then Found entryPath
+                                else Missing ()
+                        )
+                        treeLines
+                    case objectPath? of
+                      Found { index, value } ->
+                        println "git:commit:$commitHash/$value"
+                      Missing () ->
+                        io.pure ()
+                _ ->
+                  comp
+                    println "internal error: unexpected `git log` format"
+                    exit.failure
+            )
       Error err ->
         comp
           println "error: $err"
