@@ -1,51 +1,16 @@
 #! /usr/bin/env -S ipso --
 
-# https://github.com/LightAndLight/ipso/issues/324
-find : (a -> Bool) -> Array a -> (| Found : Int, Missing : () |)
-find predicate items = 
-  (array.foldl 
-    (\{ index, result } item ->
-      let nextIndex = index + 1 in
-      case result of
-        Found _ -> 
-          { index = nextIndex, result = result }
-        Missing () ->
-          if predicate item
-          then { index = nextIndex, result = Found index }
-          else { index = nextIndex, result = result }
-    )
-    { index = 0, result = Missing () }
-    items
-  ).result
-
-# https://github.com/LightAndLight/ipso/issues/324
-findMap :
-  (a -> (| Found : b, Missing : () |)) ->
-  Array a ->
-  (| Found : { index : Int, value : b }, Missing : () |)
-findMap predicate items = 
-  (array.foldl 
-    (\{ index, result } item ->
-      let nextIndex = index + 1 in
-      case result of
-        Found _ -> 
-          { index = nextIndex, result = result }
-        Missing () ->
-          case predicate item of
-            Found value -> 
-              { index = nextIndex, result = Found { index = index, value = value } }
-            Missing () ->
-              { index = nextIndex, result = result }
-    )
-    { index = 0, result = Missing () }
-    items
-  ).result
+indexed : Array a -> Array { index : Int, value : a }
+indexed input =
+  array.generate
+    (array.length input)
+    (\index -> { index = index, value = array.get! index input})
 
 hasHelp : Array String -> Bool
 hasHelp args =
-  case find (\item -> item == "--help" || item == "-h") args of
-    Found _ -> true
-    Missing () -> false
+  case array.find (\item -> item == "--help" || item == "-h") args of
+    Some _ -> true
+    None () -> false
 
 printHelp : IO ()
 printHelp =
@@ -127,21 +92,21 @@ parseArgs args =
   let argsLength = array.length args in
   if argsLength >= 1
   then
-    case array.index 0 args of
+    case array.get! 0 args of
       "show" ->
         if hasHelp args then Help printShowHelp else
         if argsLength == 2
-          then Show (array.index 1 args)
+          then Show (array.get! 1 args)
           else Error { message = "the \"show\" command takes exactly 1 argument", help = printShowHelp }
       "type" ->
         if hasHelp args then Help printTypeHelp else
         if argsLength == 2
-          then Type (array.index 1 args)
+          then Type (array.get! 1 args)
           else Error { message = "the \"type\" command takes exactly 1 argument", help = printTypeHelp }
       "uri" ->
         if hasHelp args then Help printUriHelp else
         if argsLength == 2
-          then Uri (array.index 1 args)
+          then Uri (array.get! 1 args)
           else Error { message = "the \"uri\" command takes exactly 1 argument", help = printUriHelp }
       command ->
         if hasHelp args
@@ -199,10 +164,10 @@ parseUri input =
   if splittedLength < 3
   then Error "invalid Git URI: $input"
   else
-    case array.index 0 splitted of
+    case array.get! 0 splitted of
       "git" -> 
         let makePath = \xs -> string.join ":" <| array.slice 2 (splittedLength - 2) xs in
-        case array.index 1 splitted of
+        case array.get! 1 splitted of
           "object" -> 
             Object { hash = makePath splitted }
           "blob" ->
@@ -213,11 +178,11 @@ parseUri input =
               0 ->
                 Error "invalid Git URI: $input"
               1 ->
-                Commit { hash = array.index 0 splittedPath, path = None () }
+                Commit { hash = array.get! 0 splittedPath, path = None () }
               _ ->
                 # https://github.com/LightAndLight/ipso/issues/82
-                let hash = array.index 0 splittedPath in
-                let item = array.index 1 splittedPath in
+                let hash = array.get! 0 splittedPath in
+                let item = array.get! 1 splittedPath in
                 let rest = array.slice 2 (array.length splittedPath - 2) splittedPath in
                 case item of
                   "tree" ->
@@ -261,7 +226,7 @@ parseCommitContent input =
   then Error "expected at least 2 lines commit content"
   else
     andThen
-      (case string.partsc ' ' <| array.index 0 lines of
+      (case string.partsc ' ' <| array.get! 0 lines of
         [fieldName, hash] ->
           case fieldName of
             "tree" ->
@@ -273,7 +238,7 @@ parseCommitContent input =
       )
       (\(Ok tree) ->
         andThen
-          (case string.partsc ' ' <| array.index 1 lines of
+          (case string.partsc ' ' <| array.get! 1 lines of
             [fieldName, hash] ->
               case fieldName of
                 "parent" ->
@@ -483,7 +448,7 @@ main =
           bind statusLines <- cmd.lines `git status --porcelain`
           let 
             uncommitted? =
-              find
+              array.find
                 (\statusLine ->
                   case string.parts " " statusLine of
                     [statusType, statusPath] -> statusPath == path
@@ -491,9 +456,9 @@ main =
                 )
                 statusLines
           case uncommitted? of
-            Found _ ->
+            Some _ ->
               println "warning: $path has uncommitted changes. Showing URIs for the most recently committed version.\n"
-            Missing () ->
+            None () ->
               io.pure ()
           
           bind objectHash <- io.map string.trim <| cmd.read `git rev-parse HEAD:$path`
@@ -515,18 +480,18 @@ main =
                     bind treeLines <- cmd.lines `git ls-tree $commitHash --full-tree -r -t --format "%(objectname) %(path)"`
                     let
                       objectPath? =
-                        findMap
-                        (\treeLine -> case string.parts " " treeLine of
+                        array.findMap
+                        (\item -> case string.parts " " item.value of
                           [entryHash, entryPath] ->
                             if entryHash == objectHash
-                              then Found entryPath
-                                else Missing ()
+                              then Some { index = item.index, value = entryPath }
+                              else None ()
                         )
-                        treeLines
+                        (indexed treeLines)
                     case objectPath? of
-                      Found { index, value } ->
+                      Some { index, value } ->
                         println "git:commit:$commitHash/tree/$value"
-                      Missing () ->
+                      None () ->
                         io.pure ()
                 _ ->
                   comp
